@@ -126,7 +126,6 @@ resource "aws_iam_role_policy_attachment" "attach_cw_logs" {
 }
 
 # OPTIONAL (easy): give broad SageMaker permissions to execution role
-# If you want least-privilege later, tell me you use Notebook vs Studio and I’ll shrink it.
 resource "aws_iam_role_policy_attachment" "attach_managed_sagemaker" {
   role       = aws_iam_role.sagemaker_execution.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
@@ -204,13 +203,13 @@ JSON
 # SageMaker Notebook Instance
 # ---------------------------
 resource "aws_sagemaker_notebook_instance" "notebook" {
-  name                     = "${local.name_prefix}-notebook"
-  role_arn                  = aws_iam_role.sagemaker_execution.arn
-  instance_type             = var.notebook_instance_type
-  volume_size               = var.notebook_volume_size_gb
-  lifecycle_config_name     = aws_sagemaker_notebook_instance_lifecycle_configuration.cwagent.name
-  direct_internet_access    = "Enabled"
-  root_access               = "Enabled"
+  name                  = "${local.name_prefix}-notebook"
+  role_arn               = aws_iam_role.sagemaker_execution.arn
+  instance_type          = var.notebook_instance_type
+  volume_size            = var.notebook_volume_size_gb
+  lifecycle_config_name  = aws_sagemaker_notebook_instance_lifecycle_configuration.cwagent.name
+  direct_internet_access = "Enabled"
+  root_access            = "Enabled"
 
   tags = {
     Project = var.project_name
@@ -221,7 +220,6 @@ resource "aws_sagemaker_notebook_instance" "notebook" {
 # CloudWatch alarms -> SNS
 # ---------------------------
 
-# CPU (SageMaker built-in)
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   alarm_name          = "${local.name_prefix}-cpu-high"
   alarm_description   = "SageMaker Notebook CPUUtilization is high"
@@ -243,9 +241,6 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
-# NOTE:
-# RAM/Disk are CWAgent custom metrics and require correct dimensions.
-# We set placeholder dimensions and ignore changes, then you update once you confirm dimensions in CloudWatch.
 resource "aws_cloudwatch_metric_alarm" "mem_high" {
   alarm_name          = "${local.name_prefix}-mem-high"
   alarm_description   = "Notebook mem_used_percent is high (CloudWatch Agent)"
@@ -309,21 +304,19 @@ resource "aws_iam_user" "human" {
   }
 }
 
-# Allow this user to use SageMaker console (easy managed policy)
 resource "aws_iam_user_policy_attachment" "human_sagemaker_full" {
   count      = var.create_iam_user ? 1 : 0
   user       = aws_iam_user.human[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
 }
 
-# Optional: IAM read-only for visibility/troubleshooting
 resource "aws_iam_user_policy_attachment" "human_iam_readonly" {
   count      = var.create_iam_user ? 1 : 0
   user       = aws_iam_user.human[0].name
   policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
 }
 
-# ✅ FIX: allow IAM user to change their own password (first login reset)
+# ✅ FIX 1: allow IAM user to change their own password (first login reset)
 data "aws_iam_policy_document" "human_allow_change_password" {
   statement {
     effect = "Allow"
@@ -342,7 +335,33 @@ resource "aws_iam_user_policy" "human_allow_change_password" {
   policy = data.aws_iam_policy_document.human_allow_change_password.json
 }
 
-# Create console login profile (Terraform will output a temporary password)
+# ✅ FIX 2: SageMaker console calls DataZone (ListDomains) - add permission for console user
+data "aws_iam_policy_document" "human_allow_datazone_listdomains" {
+  statement {
+    effect  = "Allow"
+    actions = [
+      "datazone:ListDomains"
+    ]
+    resources = [
+      "arn:aws:datazone:${var.aws_region}:${data.aws_caller_identity.current.account_id}:domain/*"
+    ]
+  }
+}
+
+resource "aws_iam_user_policy" "human_allow_datazone_listdomains" {
+  count  = var.create_iam_user ? 1 : 0
+  name   = "${local.name_prefix}-allow-datazone-listdomains"
+  user   = aws_iam_user.human[0].name
+  policy = data.aws_iam_policy_document.human_allow_datazone_listdomains.json
+}
+
+# (Alternative quick fix, comment above and use this instead)
+# resource "aws_iam_user_policy_attachment" "human_datazone_fulluser" {
+#   count      = var.create_iam_user ? 1 : 0
+#   user       = aws_iam_user.human[0].name
+#   policy_arn = "arn:aws:iam::aws:policy/AmazonDataZoneFullUserAccess"
+# }
+
 resource "aws_iam_user_login_profile" "human_console" {
   count                   = var.create_iam_user ? 1 : 0
   user                    = aws_iam_user.human[0].name
@@ -350,7 +369,6 @@ resource "aws_iam_user_login_profile" "human_console" {
   password_reset_required = true
 }
 
-# Optional: programmatic access key (CLI) - only if you need it
 resource "aws_iam_access_key" "human_key" {
   count = (var.create_iam_user && var.create_access_key) ? 1 : 0
   user  = aws_iam_user.human[0].name
