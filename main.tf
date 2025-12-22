@@ -1,3 +1,14 @@
+############################################
+# main.tf (FULL)
+# - Creates S3 bucket
+# - Creates SageMaker execution role (service account)
+# - Scopes S3 access to bucket + prefix
+# - Creates SNS email alerts
+# - Creates SageMaker notebook + lifecycle config (CloudWatch Agent)
+# - Creates CloudWatch alarms (CPU + CWAgent mem/disk placeholders)
+# - Optional IAM user for console login (+ change password + DataZone ListDomains)
+############################################
+
 data "aws_caller_identity" "current" {}
 
 locals {
@@ -8,6 +19,25 @@ locals {
   s3_prefix_path  = local.s3_prefix_clean == "" ? "" : "${local.s3_prefix_clean}/"
 
   cw_agent_namespace = "CWAgent"
+}
+
+# ---------------------------
+# S3 Bucket (CREATE REAL BUCKET)
+# ---------------------------
+resource "aws_s3_bucket" "sm_bucket" {
+  bucket = var.s3_bucket_name
+
+  tags = {
+    Project = var.project_name
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "sm_bucket" {
+  bucket                  = aws_s3_bucket.sm_bucket.id
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
 }
 
 # ---------------------------
@@ -44,23 +74,17 @@ resource "aws_iam_role" "sagemaker_execution" {
 
 # ---------------------------
 # IAM Policy: S3 scoped access (bucket + prefix)
+# ✅ FIX: allow ListBucket (so aws s3 ls works)
+# ✅ Object RW limited to <bucket>/<prefix>/*
 # ---------------------------
 data "aws_iam_policy_document" "s3_scoped_access" {
   statement {
-    sid     = "ListBucketScoped"
+    sid     = "ListBucket"
     effect  = "Allow"
     actions = ["s3:ListBucket"]
     resources = [
-      "arn:aws:s3:::${var.s3_bucket_name}"
+      aws_s3_bucket.sm_bucket.arn
     ]
-
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values = [
-        "${local.s3_prefix_path}*"
-      ]
-    }
   }
 
   statement {
@@ -75,7 +99,7 @@ data "aws_iam_policy_document" "s3_scoped_access" {
       "s3:ListMultipartUploadParts"
     ]
     resources = [
-      "arn:aws:s3:::${var.s3_bucket_name}/${local.s3_prefix_path}*"
+      "${aws_s3_bucket.sm_bucket.arn}/${local.s3_prefix_path}*"
     ]
   }
 }
@@ -134,6 +158,9 @@ resource "aws_iam_role_policy_attachment" "attach_managed_sagemaker" {
 # ---------------------------
 # SageMaker Notebook Lifecycle Config: install + start CloudWatch Agent
 # (publishes RAM/Disk metrics)
+#
+# NOTE: This resource failed earlier in some regions.
+# ap-southeast-1 should support it, but if it fails, comment it + lifecycle_config_name below.
 # ---------------------------
 resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "cwagent" {
   name = "${local.name_prefix}-nb-lc"
@@ -203,7 +230,7 @@ JSON
 # SageMaker Notebook Instance
 # ---------------------------
 resource "aws_sagemaker_notebook_instance" "notebook" {
-  name                  = "${local.name_prefix}-notebook"
+  name                  = var.notebook_name != "" ? var.notebook_name : "${local.name_prefix}-notebook"
   role_arn               = aws_iam_role.sagemaker_execution.arn
   instance_type          = var.notebook_instance_type
   volume_size            = var.notebook_volume_size_gb
@@ -220,6 +247,7 @@ resource "aws_sagemaker_notebook_instance" "notebook" {
 # CloudWatch alarms -> SNS
 # ---------------------------
 
+# CPU (SageMaker built-in)
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   alarm_name          = "${local.name_prefix}-cpu-high"
   alarm_description   = "SageMaker Notebook CPUUtilization is high"
@@ -241,6 +269,9 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
+# NOTE:
+# RAM/Disk are CWAgent custom metrics and require correct dimensions.
+# We set placeholder dimensions and ignore changes, then you update once you confirm dimensions in CloudWatch.
 resource "aws_cloudwatch_metric_alarm" "mem_high" {
   alarm_name          = "${local.name_prefix}-mem-high"
   alarm_description   = "Notebook mem_used_percent is high (CloudWatch Agent)"
@@ -316,7 +347,7 @@ resource "aws_iam_user_policy_attachment" "human_iam_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
 }
 
-# ✅ FIX 1: allow IAM user to change their own password (first login reset)
+# allow IAM user to change their own password (first login reset)
 data "aws_iam_policy_document" "human_allow_change_password" {
   statement {
     effect = "Allow"
@@ -335,13 +366,11 @@ resource "aws_iam_user_policy" "human_allow_change_password" {
   policy = data.aws_iam_policy_document.human_allow_change_password.json
 }
 
-# ✅ FIX 2: SageMaker console calls DataZone (ListDomains) - add permission for console user
+# SageMaker console calls DataZone (ListDomains) - add permission for console user
 data "aws_iam_policy_document" "human_allow_datazone_listdomains" {
   statement {
     effect  = "Allow"
-    actions = [
-      "datazone:ListDomains"
-    ]
+    actions = ["datazone:ListDomains"]
     resources = [
       "arn:aws:datazone:${var.aws_region}:${data.aws_caller_identity.current.account_id}:domain/*"
     ]
@@ -355,13 +384,7 @@ resource "aws_iam_user_policy" "human_allow_datazone_listdomains" {
   policy = data.aws_iam_policy_document.human_allow_datazone_listdomains.json
 }
 
-# (Alternative quick fix, comment above and use this instead)
-# resource "aws_iam_user_policy_attachment" "human_datazone_fulluser" {
-#   count      = var.create_iam_user ? 1 : 0
-#   user       = aws_iam_user.human[0].name
-#   policy_arn = "arn:aws:iam::aws:policy/AmazonDataZoneFullUserAccess"
-# }
-
+# Console login profile (Terraform outputs a temporary password)
 resource "aws_iam_user_login_profile" "human_console" {
   count                   = var.create_iam_user ? 1 : 0
   user                    = aws_iam_user.human[0].name
@@ -369,6 +392,7 @@ resource "aws_iam_user_login_profile" "human_console" {
   password_reset_required = true
 }
 
+# Optional: programmatic access key (CLI) - only if you need it
 resource "aws_iam_access_key" "human_key" {
   count = (var.create_iam_user && var.create_access_key) ? 1 : 0
   user  = aws_iam_user.human[0].name

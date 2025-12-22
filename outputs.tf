@@ -1,41 +1,68 @@
-output "account_id" {
+############################################
+# outputs.tf
+############################################
+
+output "aws_account_id" {
+  description = "AWS Account ID that Terraform is running against"
   value       = data.aws_caller_identity.current.account_id
-  description = "AWS Account ID (use for console sign-in URL if needed)"
 }
 
-output "sagemaker_execution_role_arn" {
-  value       = aws_iam_role.sagemaker_execution.arn
-  description = "IAM Role used by SageMaker (service account equivalent)"
+output "aws_region" {
+  description = "AWS region"
+  value       = var.aws_region
+}
+
+output "s3_bucket_name" {
+  description = "S3 bucket created/used for SageMaker data & outputs"
+  value       = aws_s3_bucket.sm_bucket.bucket
+}
+
+output "s3_prefix" {
+  description = "S3 prefix used for scoped access"
+  value       = local.s3_prefix_path
 }
 
 output "sns_topic_arn" {
+  description = "SNS topic ARN for alarms"
   value       = aws_sns_topic.alerts.arn
-  description = "SNS topic for alerts"
+}
+
+output "sagemaker_execution_role_arn" {
+  description = "Execution role ARN for SageMaker (service account)"
+  value       = aws_iam_role.sagemaker_execution.arn
 }
 
 output "notebook_name" {
+  description = "SageMaker Notebook instance name"
   value       = aws_sagemaker_notebook_instance.notebook.name
-  description = "SageMaker notebook instance name"
 }
 
-output "iam_username" {
-  value       = var.create_iam_user ? aws_iam_user.human[0].name : null
-  description = "IAM username for console login"
+output "notebook_arn" {
+  description = "SageMaker Notebook instance ARN"
+  value       = aws_sagemaker_notebook_instance.notebook.arn
 }
 
-output "iam_user_console_password" {
-  value       = var.create_iam_user ? aws_iam_user_login_profile.human_console[0].password : null
-  description = "Temporary console password (change required at first login)"
-  sensitive   = true
+output "notebook_url" {
+  description = "Notebook URL (may be empty until InService)"
+  value       = aws_sagemaker_notebook_instance.notebook.url
 }
 
-output "iam_user_access_key_id" {
-  value       = (var.create_iam_user && var.create_access_key) ? aws_iam_access_key.human_key[0].id : null
-  description = "Access key id (if create_access_key=true)"
+output "cloudwatch_namespace" {
+  description = "Namespace used by CloudWatch Agent custom metrics"
+  value       = local.cw_agent_namespace
 }
 
-output "iam_user_secret_access_key" {
-  value       = (var.create_iam_user && var.create_access_key) ? aws_iam_access_key.human_key[0].secret : null
-  description = "Secret access key (if create_access_key=true)"
-  sensitive   = true
+output "alarm_cpu_name" {
+  description = "CloudWatch alarm name for CPU high"
+  value       = aws_cloudwatch_metric_alarm.cpu_high.alarm_name
+}
+
+output "alarm_mem_name" {
+  description = "CloudWatch alarm name for memory high"
+  value       = aws_cloudwatch_metric_alarm.mem_high.alarm_name
+}
+
+output "alarm_disk_name" {
+  description = "CloudWatch alarm name for disk high"
+  value       = aws_cloudwatch_metric_alarm.disk_high.alarm_name
 }
