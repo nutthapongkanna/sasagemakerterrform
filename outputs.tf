@@ -66,3 +66,14 @@ output "alarm_disk_name" {
   description = "CloudWatch alarm name for disk high"
   value       = aws_cloudwatch_metric_alarm.disk_high.alarm_name
 }
+
+output "iam_user_name" {
+  description = "IAM user created for AWS Console login (if enabled)"
+  value       = var.create_iam_user ? aws_iam_user.human[0].name : null
+}
+
+output "iam_user_temp_password" {
+  description = "Temporary console password (ONLY available at creation time). If you recreate the login profile, it will change."
+  value       = var.create_iam_user ? aws_iam_user_login_profile.human_console[0].password : null
+  sensitive   = true
+}
