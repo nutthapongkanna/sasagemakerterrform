@@ -156,7 +156,7 @@ resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "cwagent" {
       "metrics": {
         "namespace": "${local.cw_agent_namespace}",
         "append_dimensions": {
-          "InstanceId": "\${aws:InstanceId}"
+          "InstanceId": "$${aws:InstanceId}"
         },
         "metrics_collected": {
           "cpu": {

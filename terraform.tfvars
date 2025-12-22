@@ -1,4 +1,4 @@
-aws_region   = "ap-southeast-7"
+aws_region   = "ap-southeast-1"
 project_name = "sm-lab"
 
 alert_email = "you@example.com"
