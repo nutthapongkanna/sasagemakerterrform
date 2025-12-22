@@ -7,6 +7,11 @@ variable "project_name" {
   type        = string
   description = "Prefix for resource names"
 }
+variable "notebook_name" {
+  description = "Optional override name for SageMaker Notebook instance. If empty, defaults to <project_name>-notebook"
+  type        = string
+  default     = ""
+}
 
 variable "alert_email" {
   type        = string
