@@ -323,6 +323,25 @@ resource "aws_iam_user_policy_attachment" "human_iam_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
 }
 
+# ✅ FIX: allow IAM user to change their own password (first login reset)
+data "aws_iam_policy_document" "human_allow_change_password" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:GetAccountPasswordPolicy",
+      "iam:ChangePassword"
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_user_policy" "human_allow_change_password" {
+  count  = var.create_iam_user ? 1 : 0
+  name   = "${local.name_prefix}-allow-self-change-password"
+  user   = aws_iam_user.human[0].name
+  policy = data.aws_iam_policy_document.human_allow_change_password.json
+}
+
 # Create console login profile (Terraform will output a temporary password)
 resource "aws_iam_user_login_profile" "human_console" {
   count                   = var.create_iam_user ? 1 : 0
