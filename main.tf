@@ -1,5 +1,5 @@
 ############################################
-# main.tf (FULL) - FINAL FIX (workspace disk monitored)
+# main.tf (FULL) - FIXED VERSION
 # - Creates S3 bucket
 # - Creates SageMaker execution role (service role)
 # - Scopes S3 access to bucket + prefix
@@ -11,9 +11,9 @@
 # Fixes included:
 # 1) No Terraform cycle: use local.notebook_effective_name everywhere
 # 2) Lifecycle non-blocking: timeout + set +e + exit 0 (avoid >5min failure)
-# 3) Disk alarm uses metric_query.metric with period=60 (avoid "Period must not be null")
+# 3) Escape CWAgent ${aws:InstanceId} with $${...} to avoid Terraform interpolation error
 # 4) CWAgent collects disk_used_percent for BOTH "/" and "/home/ec2-user/SageMaker"
-# 5) Disk alarm targets workspace path "/home/ec2-user/SageMaker"
+# 5) Disk alarm targets workspace path "/home/ec2-user/SageMaker" using metric_query.metric with period=60
 ############################################
 
 data "aws_caller_identity" "current" {}
@@ -25,12 +25,12 @@ locals {
 
   cw_agent_namespace = "CWAgent"
 
-  # ✅ FIX: compute notebook name without referencing the notebook resource (prevents cycle)
+  # compute notebook name without referencing the notebook resource (prevents cycle)
   notebook_effective_name = var.notebook_name != "" ? var.notebook_name : "${var.project_name}-notebook"
 }
 
 # ---------------------------
-# S3 Bucket (CREATE REAL BUCKET)
+# S3 Bucket
 # ---------------------------
 resource "aws_s3_bucket" "sm_bucket" {
   bucket = var.s3_bucket_name
@@ -81,8 +81,6 @@ resource "aws_iam_role" "sagemaker_execution" {
 
 # ---------------------------
 # IAM Policy: S3 scoped access (bucket + prefix)
-# - allow ListBucket (so aws s3 ls works)
-# - Object RW limited to <bucket>/<prefix>*
 # ---------------------------
 data "aws_iam_policy_document" "s3_scoped_access" {
   statement {
@@ -154,7 +152,7 @@ resource "aws_iam_role_policy_attachment" "attach_cw_logs" {
   policy_arn = aws_iam_policy.cw_logs_access.arn
 }
 
-# Optional (easy): give broad SageMaker permissions to execution role
+# Optional: broad SageMaker permissions to execution role
 resource "aws_iam_role_policy_attachment" "attach_managed_sagemaker" {
   role       = aws_iam_role.sagemaker_execution.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
@@ -162,10 +160,9 @@ resource "aws_iam_role_policy_attachment" "attach_managed_sagemaker" {
 
 # ---------------------------
 # SageMaker Notebook Lifecycle Config: install + start CloudWatch Agent
-# - Sends mem/disk metrics to CWAgent namespace
-# - Adds NotebookInstanceName dimension for easier filtering (may not show in CW UI groups)
-# - Collects disk_used_percent for BOTH "/" and "/home/ec2-user/SageMaker"
-# ✅ FIX: non-blocking lifecycle (avoid >5min failure)
+# - Escape ${aws:InstanceId} -> $${aws:InstanceId} to avoid Terraform interpolation
+# - Collect disk metrics for "/" and "/home/ec2-user/SageMaker"
+# - Non-blocking: timeouts and always exit 0
 # ---------------------------
 resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "cwagent" {
   name = "${local.name_prefix}-nb-lc"
@@ -177,7 +174,6 @@ set +e
 LOG=/var/log/cwagent-lifecycle.log
 echo "=== CWAgent lifecycle start ===" >> $LOG
 
-# Prevent yum from hanging > 5 minutes total lifecycle window
 timeout 180 sudo yum install -y amazon-cloudwatch-agent >> $LOG 2>&1 || true
 
 echo "=== Writing CloudWatch Agent config ===" >> $LOG
@@ -217,10 +213,10 @@ sudo sed -i "s/__NOTEBOOK_NAME__/${local.notebook_effective_name}/g" /opt/aws/am
 
 echo "=== Starting CloudWatch Agent ===" >> $LOG
 timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop >> $LOG 2>&1 || true
-timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \\
-  -a fetch-config \\
-  -m ec2 \\
-  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \\
+timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config \
+  -m ec2 \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
   -s >> $LOG 2>&1 || true
 
 echo "=== CWAgent lifecycle done ===" >> $LOG
@@ -289,10 +285,6 @@ resource "aws_cloudwatch_metric_alarm" "mem_high" {
 
   namespace   = local.cw_agent_namespace
   metric_name = "mem_used_percent"
-
-  # NOTE: CWAgent on SageMaker commonly groups by InstanceId; NotebookInstanceName may not appear in UI.
-  # If your metrics include NotebookInstanceName, you can add it back here.
-  # For a guaranteed match across SageMaker instances, prefer InstanceId-based alarm.
   dimensions = {
     NotebookInstanceName = local.notebook_effective_name
   }
@@ -302,6 +294,8 @@ resource "aws_cloudwatch_metric_alarm" "mem_high" {
 }
 
 # DISK (CWAgent) - Workspace path "/home/ec2-user/SageMaker"
+# Note: CWAgent disk metrics commonly include dimensions like (InstanceId, path, device, fstype).
+# This alarm filters by 'path' only to match your workspace mount.
 resource "aws_cloudwatch_metric_alarm" "disk_high" {
   alarm_name          = "${local.name_prefix}-disk-high"
   alarm_description   = "Notebook disk_used_percent is high (CloudWatch Agent) - /home/ec2-user/SageMaker"
