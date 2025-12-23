@@ -1,5 +1,5 @@
 ############################################
-# main.tf (FULL)
+# main.tf (FULL) - FINAL FIX (workspace disk monitored)
 # - Creates S3 bucket
 # - Creates SageMaker execution role (service role)
 # - Scopes S3 access to bucket + prefix
@@ -7,9 +7,14 @@
 # - Creates SageMaker notebook + lifecycle config (CloudWatch Agent)
 # - Creates CloudWatch alarms (CPU + CWAgent mem/disk)
 # - Optional IAM user for console login (+ temp password) + DataZone ListDomains
+#
+# Fixes included:
+# 1) No Terraform cycle: use local.notebook_effective_name everywhere
+# 2) Lifecycle non-blocking: timeout + set +e + exit 0 (avoid >5min failure)
+# 3) Disk alarm uses metric_query.metric with period=60 (avoid "Period must not be null")
+# 4) CWAgent collects disk_used_percent for BOTH "/" and "/home/ec2-user/SageMaker"
+# 5) Disk alarm targets workspace path "/home/ec2-user/SageMaker"
 ############################################
-
-
 
 data "aws_caller_identity" "current" {}
 
@@ -19,6 +24,9 @@ locals {
   s3_prefix_path  = local.s3_prefix_clean == "" ? "" : "${local.s3_prefix_clean}/"
 
   cw_agent_namespace = "CWAgent"
+
+  # ✅ FIX: compute notebook name without referencing the notebook resource (prevents cycle)
+  notebook_effective_name = var.notebook_name != "" ? var.notebook_name : "${var.project_name}-notebook"
 }
 
 # ---------------------------
@@ -84,13 +92,6 @@ data "aws_iam_policy_document" "s3_scoped_access" {
     resources = [
       aws_s3_bucket.sm_bucket.arn
     ]
-
-    # (optional) ถ้าอยากล็อค list ให้เห็นเฉพาะ prefix:
-    # condition {
-    #   test     = "StringLike"
-    #   variable = "s3:prefix"
-    #   values   = ["${local.s3_prefix_path}*"]
-    # }
   }
 
   statement {
@@ -161,20 +162,25 @@ resource "aws_iam_role_policy_attachment" "attach_managed_sagemaker" {
 
 # ---------------------------
 # SageMaker Notebook Lifecycle Config: install + start CloudWatch Agent
-# - ส่ง mem/disk metric ไปที่ CWAgent namespace
-# - ใส่ append_dimensions: NotebookInstanceName เพื่อให้ Alarm ผูก dimension ได้แน่นอน
+# - Sends mem/disk metrics to CWAgent namespace
+# - Adds NotebookInstanceName dimension for easier filtering (may not show in CW UI groups)
+# - Collects disk_used_percent for BOTH "/" and "/home/ec2-user/SageMaker"
+# ✅ FIX: non-blocking lifecycle (avoid >5min failure)
 # ---------------------------
 resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "cwagent" {
   name = "${local.name_prefix}-nb-lc"
 
   on_start = base64encode(<<-EOT
 #!/bin/bash
-set -e
+set +e
 
-echo "=== Installing CloudWatch Agent ==="
-sudo yum install -y amazon-cloudwatch-agent || true
+LOG=/var/log/cwagent-lifecycle.log
+echo "=== CWAgent lifecycle start ===" >> $LOG
 
-echo "=== Writing CloudWatch Agent config ==="
+# Prevent yum from hanging > 5 minutes total lifecycle window
+timeout 180 sudo yum install -y amazon-cloudwatch-agent >> $LOG 2>&1 || true
+
+echo "=== Writing CloudWatch Agent config ===" >> $LOG
 sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >/dev/null <<'JSON'
 {
   "agent": {
@@ -182,10 +188,10 @@ sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >/dev
     "run_as_user": "root"
   },
   "metrics": {
-    "namespace": "${local.cw_agent_namespace}",
+    "namespace": "CWAgent",
     "append_dimensions": {
-      "InstanceId": "$${aws:InstanceId}",
-      "NotebookInstanceName": "${aws_sagemaker_notebook_instance.notebook.name}"
+      "InstanceId": "${aws:InstanceId}",
+      "NotebookInstanceName": "__NOTEBOOK_NAME__"
     },
     "metrics_collected": {
       "mem": {
@@ -199,22 +205,26 @@ sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >/dev
           { "name": "disk_used_percent", "rename": "disk_used_percent", "unit": "Percent" }
         ],
         "metrics_collection_interval": 60,
-        "resources": ["/"]
+        "resources": ["/", "/home/ec2-user/SageMaker"]
       }
     }
   }
 }
 JSON
 
-echo "=== Starting CloudWatch Agent ==="
-sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop || true
-sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \\
+# Replace placeholder notebook name safely (no terraform cycle)
+sudo sed -i "s/__NOTEBOOK_NAME__/${local.notebook_effective_name}/g" /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >> $LOG 2>&1 || true
+
+echo "=== Starting CloudWatch Agent ===" >> $LOG
+timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop >> $LOG 2>&1 || true
+timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \\
   -a fetch-config \\
   -m ec2 \\
   -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \\
-  -s
+  -s >> $LOG 2>&1 || true
 
-echo "=== CloudWatch Agent started ==="
+echo "=== CWAgent lifecycle done ===" >> $LOG
+exit 0
 EOT
   )
 }
@@ -223,7 +233,7 @@ EOT
 # SageMaker Notebook Instance
 # ---------------------------
 resource "aws_sagemaker_notebook_instance" "notebook" {
-  name                  = var.notebook_name != "" ? var.notebook_name : "${local.name_prefix}-notebook"
+  name                  = local.notebook_effective_name
   role_arn              = aws_iam_role.sagemaker_execution.arn
   instance_type         = var.notebook_instance_type
   volume_size           = var.notebook_volume_size_gb
@@ -257,7 +267,7 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   namespace   = "AWS/SageMaker"
   metric_name = "CPUUtilization"
   dimensions = {
-    NotebookInstanceName = aws_sagemaker_notebook_instance.notebook.name
+    NotebookInstanceName = local.notebook_effective_name
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
@@ -279,23 +289,26 @@ resource "aws_cloudwatch_metric_alarm" "mem_high" {
 
   namespace   = local.cw_agent_namespace
   metric_name = "mem_used_percent"
+
+  # NOTE: CWAgent on SageMaker commonly groups by InstanceId; NotebookInstanceName may not appear in UI.
+  # If your metrics include NotebookInstanceName, you can add it back here.
+  # For a guaranteed match across SageMaker instances, prefer InstanceId-based alarm.
   dimensions = {
-    NotebookInstanceName = aws_sagemaker_notebook_instance.notebook.name
+    NotebookInstanceName = local.notebook_effective_name
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
   ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
-# DISK (CWAgent) - ใช้ SEARCH เพราะ disk metric มักมี dimension เพิ่ม (path/device/fstype)
+# DISK (CWAgent) - Workspace path "/home/ec2-user/SageMaker"
 resource "aws_cloudwatch_metric_alarm" "disk_high" {
   alarm_name          = "${local.name_prefix}-disk-high"
-  alarm_description   = "Notebook disk_used_percent is high (CloudWatch Agent)"
+  alarm_description   = "Notebook disk_used_percent is high (CloudWatch Agent) - /home/ec2-user/SageMaker"
   comparison_operator = "GreaterThanOrEqualToThreshold"
 
   evaluation_periods = var.alarm_evaluation_periods
   threshold          = var.disk_alarm_threshold
-
   treat_missing_data = "notBreaching"
 
   alarm_actions = [aws_sns_topic.alerts.arn]
@@ -304,7 +317,17 @@ resource "aws_cloudwatch_metric_alarm" "disk_high" {
   metric_query {
     id          = "m1"
     return_data = true
-    expression  = "SEARCH('{${local.cw_agent_namespace},NotebookInstanceName,path} MetricName=\"disk_used_percent\" NotebookInstanceName=\"${aws_sagemaker_notebook_instance.notebook.name}\" path=\"/\"', 'Average', 60)"
+
+    metric {
+      namespace   = local.cw_agent_namespace
+      metric_name = "disk_used_percent"
+      period      = 60
+      stat        = "Average"
+
+      dimensions = {
+        path = "/home/ec2-user/SageMaker"
+      }
+    }
   }
 }
 
@@ -355,8 +378,8 @@ resource "aws_iam_user_policy" "human_allow_change_password" {
 # SageMaker console sometimes calls DataZone ListDomains
 data "aws_iam_policy_document" "human_allow_datazone_listdomains" {
   statement {
-    effect   = "Allow"
-    actions  = ["datazone:ListDomains"]
+    effect  = "Allow"
+    actions = ["datazone:ListDomains"]
     resources = [
       "arn:aws:datazone:${var.aws_region}:${data.aws_caller_identity.current.account_id}:domain/*"
     ]

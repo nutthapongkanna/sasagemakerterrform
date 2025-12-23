@@ -13,10 +13,10 @@ notebook_instance_type   = "ml.t3.medium"
 notebook_volume_size_gb  = 20
 
 # Alarms
+cpu_alarm_threshold  = 20
+mem_alarm_threshold  = 40
+disk_alarm_threshold = 40
 alarm_evaluation_periods = 1
-cpu_alarm_threshold      = 80
-mem_alarm_threshold      = 80
-disk_alarm_threshold     = 80
 
 # Optional IAM User
 create_iam_user                    = true
