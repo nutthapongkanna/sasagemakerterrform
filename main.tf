@@ -305,7 +305,7 @@ resource "aws_cloudwatch_metric_alarm" "disk_high" {
   evaluation_periods = var.alarm_evaluation_periods
   threshold          = var.disk_alarm_threshold
   treat_missing_data = "notBreaching"
-  statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
+ 
   alarm_actions = [aws_sns_topic.alerts.arn]
   ok_actions    = [aws_sns_topic.alerts.arn]
 
