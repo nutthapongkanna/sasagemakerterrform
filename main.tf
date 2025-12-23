@@ -1,32 +1,37 @@
 ############################################
-# main.tf (FULL - FINAL, ALL INCLUDED)
+# main.tf (FULL) - FIXED VERSION
+# - Creates S3 bucket
+# - Creates SageMaker execution role (service role)
+# - Scopes S3 access to bucket + prefix
+# - Creates SNS email alerts
+# - Creates SageMaker notebook + lifecycle config (CloudWatch Agent)
+# - Creates CloudWatch alarms (CPU + CWAgent mem/disk)
+# - Optional IAM user for console login (+ temp password) + DataZone ListDomains
+#
+# Fixes included:
+# 1) No Terraform cycle: use local.notebook_effective_name everywhere
+# 2) Lifecycle non-blocking: timeout + set +e + exit 0 (avoid >5min failure)
+# 3) Escape CWAgent ${aws:InstanceId} with $${...} to avoid Terraform interpolation error
+# 4) CWAgent collects disk_used_percent for BOTH "/" and "/home/ec2-user/SageMaker"
+# 5) Disk alarm targets workspace path "/home/ec2-user/SageMaker" using metric_query.metric with period=60
 ############################################
-
 
 data "aws_caller_identity" "current" {}
 
-############################
-# LOCALS
-############################
 locals {
-  name_prefix = var.project_name
-
+  name_prefix     = var.project_name
   s3_prefix_clean = trim(var.s3_prefix, "/")
   s3_prefix_path  = local.s3_prefix_clean == "" ? "" : "${local.s3_prefix_clean}/"
 
   cw_agent_namespace = "CWAgent"
 
-  # ป้องกัน terraform cycle
-  notebook_effective_name = (
-    var.notebook_name != ""
-    ? var.notebook_name
-    : "${var.project_name}-notebook"
-  )
+  # compute notebook name without referencing the notebook resource (prevents cycle)
+  notebook_effective_name = var.notebook_name != "" ? var.notebook_name : "${var.project_name}-notebook"
 }
 
-############################
-# S3 BUCKET
-############################
+# ---------------------------
+# S3 Bucket
+# ---------------------------
 resource "aws_s3_bucket" "sm_bucket" {
   bucket = var.s3_bucket_name
   tags = {
@@ -42,9 +47,9 @@ resource "aws_s3_bucket_public_access_block" "sm_bucket" {
   restrict_public_buckets = true
 }
 
-############################
-# SNS (EMAIL ALERT)
-############################
+# ---------------------------
+# SNS topic + email subscription
+# ---------------------------
 resource "aws_sns_topic" "alerts" {
   name = "${local.name_prefix}-alerts"
 }
@@ -55,9 +60,9 @@ resource "aws_sns_topic_subscription" "email" {
   endpoint  = var.alert_email
 }
 
-############################
-# IAM ROLE (SAGEMAKER EXECUTION)
-############################
+# ---------------------------
+# IAM Role (SageMaker execution role)
+# ---------------------------
 data "aws_iam_policy_document" "sagemaker_assume_role" {
   statement {
     effect = "Allow"
@@ -74,22 +79,29 @@ resource "aws_iam_role" "sagemaker_execution" {
   assume_role_policy = data.aws_iam_policy_document.sagemaker_assume_role.json
 }
 
-############################
-# IAM POLICIES
-############################
+# ---------------------------
+# IAM Policy: S3 scoped access (bucket + prefix)
+# ---------------------------
 data "aws_iam_policy_document" "s3_scoped_access" {
   statement {
-    effect    = "Allow"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.sm_bucket.arn]
+    sid     = "ListBucket"
+    effect  = "Allow"
+    actions = ["s3:ListBucket"]
+    resources = [
+      aws_s3_bucket.sm_bucket.arn
+    ]
   }
 
   statement {
+    sid    = "ObjectScopedRW"
     effect = "Allow"
     actions = [
       "s3:GetObject",
       "s3:PutObject",
-      "s3:DeleteObject"
+      "s3:DeleteObject",
+      "s3:AbortMultipartUpload",
+      "s3:ListBucketMultipartUploads",
+      "s3:ListMultipartUploadParts"
     ]
     resources = [
       "${aws_s3_bucket.sm_bucket.arn}/${local.s3_prefix_path}*"
@@ -102,13 +114,25 @@ resource "aws_iam_policy" "s3_scoped_access" {
   policy = data.aws_iam_policy_document.s3_scoped_access.json
 }
 
+# ---------------------------
+# IAM Policy: CloudWatch Logs + PutMetricData
+# ---------------------------
 data "aws_iam_policy_document" "cw_logs_access" {
   statement {
     effect = "Allow"
     actions = [
-      "logs:*",
-      "cloudwatch:PutMetricData"
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams"
     ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["cloudwatch:PutMetricData"]
     resources = ["*"]
   }
 }
@@ -118,24 +142,28 @@ resource "aws_iam_policy" "cw_logs_access" {
   policy = data.aws_iam_policy_document.cw_logs_access.json
 }
 
-resource "aws_iam_role_policy_attachment" "attach_s3" {
+resource "aws_iam_role_policy_attachment" "attach_s3_scoped" {
   role       = aws_iam_role.sagemaker_execution.name
   policy_arn = aws_iam_policy.s3_scoped_access.arn
 }
 
-resource "aws_iam_role_policy_attachment" "attach_cw" {
+resource "aws_iam_role_policy_attachment" "attach_cw_logs" {
   role       = aws_iam_role.sagemaker_execution.name
   policy_arn = aws_iam_policy.cw_logs_access.arn
 }
 
-resource "aws_iam_role_policy_attachment" "attach_sagemaker" {
+# Optional: broad SageMaker permissions to execution role
+resource "aws_iam_role_policy_attachment" "attach_managed_sagemaker" {
   role       = aws_iam_role.sagemaker_execution.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
 }
 
-############################
-# NOTEBOOK LIFECYCLE (CWAGENT)
-############################
+# ---------------------------
+# SageMaker Notebook Lifecycle Config: install + start CloudWatch Agent
+# - Escape ${aws:InstanceId} -> $${aws:InstanceId} to avoid Terraform interpolation
+# - Collect disk metrics for "/" and "/home/ec2-user/SageMaker"
+# - Non-blocking: timeouts and always exit 0
+# ---------------------------
 resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "cwagent" {
   name = "${local.name_prefix}-nb-lc"
 
@@ -143,24 +171,36 @@ resource "aws_sagemaker_notebook_instance_lifecycle_configuration" "cwagent" {
 #!/bin/bash
 set +e
 
-yum install -y amazon-cloudwatch-agent || true
+LOG=/var/log/cwagent-lifecycle.log
+echo "=== CWAgent lifecycle start ===" >> $LOG
 
-cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'JSON'
+timeout 180 sudo yum install -y amazon-cloudwatch-agent >> $LOG 2>&1 || true
+
+echo "=== Writing CloudWatch Agent config ===" >> $LOG
+sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >/dev/null <<'JSON'
 {
   "agent": {
-    "metrics_collection_interval": 60
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
   },
   "metrics": {
     "namespace": "CWAgent",
     "append_dimensions": {
-      "NotebookInstanceName": "${local.notebook_effective_name}"
+      "InstanceId": "$${aws:InstanceId}",
+      "NotebookInstanceName": "__NOTEBOOK_NAME__"
     },
     "metrics_collected": {
       "mem": {
-        "measurement": ["mem_used_percent"]
+        "measurement": [
+          { "name": "mem_used_percent", "rename": "mem_used_percent", "unit": "Percent" }
+        ],
+        "metrics_collection_interval": 60
       },
       "disk": {
-        "measurement": ["disk_used_percent"],
+        "measurement": [
+          { "name": "disk_used_percent", "rename": "disk_used_percent", "unit": "Percent" }
+        ],
+        "metrics_collection_interval": 60,
         "resources": ["/", "/home/ec2-user/SageMaker"]
       }
     }
@@ -168,20 +208,26 @@ cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'JSON'
 }
 JSON
 
-/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+# Replace placeholder notebook name safely (no terraform cycle)
+sudo sed -i "s/__NOTEBOOK_NAME__/${local.notebook_effective_name}/g" /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >> $LOG 2>&1 || true
+
+echo "=== Starting CloudWatch Agent ===" >> $LOG
+timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop >> $LOG 2>&1 || true
+timeout 120 sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
   -a fetch-config \
   -m ec2 \
   -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
-  -s || true
+  -s >> $LOG 2>&1 || true
 
+echo "=== CWAgent lifecycle done ===" >> $LOG
 exit 0
 EOT
   )
 }
 
-############################
-# SAGEMAKER NOTEBOOK
-############################
+# ---------------------------
+# SageMaker Notebook Instance
+# ---------------------------
 resource "aws_sagemaker_notebook_instance" "notebook" {
   name                  = local.notebook_effective_name
   role_arn              = aws_iam_role.sagemaker_execution.arn
@@ -197,82 +243,92 @@ resource "aws_sagemaker_notebook_instance" "notebook" {
   }
 }
 
-############################
-# CLOUDWATCH ALARMS
-############################
+# ---------------------------
+# CloudWatch alarms -> SNS
+# ---------------------------
 
-# CPU
+# CPU (SageMaker built-in)
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   alarm_name          = "${local.name_prefix}-cpu-high"
+  alarm_description   = "SageMaker Notebook CPUUtilization is high"
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = var.cpu_alarm_threshold
-  evaluation_periods  = 1
-  period              = 60
-  statistic           = "Average"
+
+  evaluation_periods = var.alarm_evaluation_periods
+  period             = 60
+  threshold          = var.cpu_alarm_threshold
+statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
+
+  treat_missing_data = "notBreaching"
 
   namespace   = "AWS/SageMaker"
   metric_name = "CPUUtilization"
-
   dimensions = {
     NotebookInstanceName = local.notebook_effective_name
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
-# MEMORY (CWAGENT)
+# MEM (CWAgent)
 resource "aws_cloudwatch_metric_alarm" "mem_high" {
   alarm_name          = "${local.name_prefix}-mem-high"
+  alarm_description   = "Notebook mem_used_percent is high (CloudWatch Agent)"
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = var.mem_alarm_threshold
-  evaluation_periods  = 1
-  treat_missing_data  = "notBreaching"
 
-  metric_query {
-    id          = "m1"
-    return_data = true
-    metric {
-      namespace   = "CWAgent"
-      metric_name = "mem_used_percent"
-      stat        = "Maximum"
-      period      = 60
-      dimensions = {
-        NotebookInstanceName = local.notebook_effective_name
-      }
-    }
+  evaluation_periods = var.alarm_evaluation_periods
+  period             = 60
+  statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
+  threshold          = var.mem_alarm_threshold
+  statistic          = "Average"
+
+  treat_missing_data = "notBreaching"
+
+  namespace   = local.cw_agent_namespace
+  metric_name = "mem_used_percent"
+  dimensions = {
+    NotebookInstanceName = local.notebook_effective_name
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
 }
 
-# DISK (WORKSPACE)
+# DISK (CWAgent) - Workspace path "/home/ec2-user/SageMaker"
+# Note: CWAgent disk metrics commonly include dimensions like (InstanceId, path, device, fstype).
+# This alarm filters by 'path' only to match your workspace mount.
 resource "aws_cloudwatch_metric_alarm" "disk_high" {
   alarm_name          = "${local.name_prefix}-disk-high"
+  alarm_description   = "Notebook disk_used_percent is high (CloudWatch Agent) - /home/ec2-user/SageMaker"
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  threshold           = var.disk_alarm_threshold
-  evaluation_periods  = 1
-  treat_missing_data  = "notBreaching"
+
+  evaluation_periods = var.alarm_evaluation_periods
+  threshold          = var.disk_alarm_threshold
+  treat_missing_data = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
 
   metric_query {
     id          = "m1"
     return_data = true
+
     metric {
-      namespace   = "CWAgent"
+      namespace   = local.cw_agent_namespace
       metric_name = "disk_used_percent"
-      stat        = "Maximum"
       period      = 60
+      stat        = "Maximum"
+
       dimensions = {
         path = "/home/ec2-user/SageMaker"
       }
     }
   }
-
-  alarm_actions = [aws_sns_topic.alerts.arn]
 }
 
-############################
-# IAM USER (HUMAN - CONSOLE LOGIN)
-############################
+# ---------------------------
+# IAM USER (human) for AWS Console login (SageMaker UI) - OPTIONAL
+# ---------------------------
 resource "aws_iam_user" "human" {
   count = var.create_iam_user ? 1 : 0
   name  = var.iam_user_name
@@ -295,6 +351,7 @@ resource "aws_iam_user_policy_attachment" "human_iam_readonly" {
   policy_arn = "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
 }
 
+# allow IAM user to change their own password
 data "aws_iam_policy_document" "human_allow_change_password" {
   statement {
     effect = "Allow"
@@ -313,6 +370,7 @@ resource "aws_iam_user_policy" "human_allow_change_password" {
   policy = data.aws_iam_policy_document.human_allow_change_password.json
 }
 
+# SageMaker console sometimes calls DataZone ListDomains
 data "aws_iam_policy_document" "human_allow_datazone_listdomains" {
   statement {
     effect  = "Allow"
@@ -330,6 +388,7 @@ resource "aws_iam_user_policy" "human_allow_datazone_listdomains" {
   policy = data.aws_iam_policy_document.human_allow_datazone_listdomains.json
 }
 
+# Console login profile (Terraform outputs a temp password)
 resource "aws_iam_user_login_profile" "human_console" {
   count                   = var.create_iam_user ? 1 : 0
   user                    = aws_iam_user.human[0].name
@@ -337,6 +396,7 @@ resource "aws_iam_user_login_profile" "human_console" {
   password_reset_required = true
 }
 
+# Optional: programmatic access key (CLI) - only if you need it
 resource "aws_iam_access_key" "human_key" {
   count = (var.create_iam_user && var.create_access_key) ? 1 : 0
   user  = aws_iam_user.human[0].name
