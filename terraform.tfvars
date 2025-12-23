@@ -1,14 +1,14 @@
 aws_region    = "ap-southeast-1"
-project_name  = "sm-lab"
+project_name  = ""
 
 # ต้อง unique ทั้งโลก
-s3_bucket_name = "sm-lab-nutthapong-1234567890"
+s3_bucket_name = ""
 s3_prefix      = "outputs/"
 
-alert_email = "you@example.com"
+alert_email = ""
 
 # Notebook
-notebook_name            = "sm-lab-notebook"
+notebook_name            = ""
 notebook_instance_type   = "ml.t3.medium"
 notebook_volume_size_gb  = 20
 
