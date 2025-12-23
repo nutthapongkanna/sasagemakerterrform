@@ -256,7 +256,7 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   evaluation_periods = var.alarm_evaluation_periods
   period             = 60
   threshold          = var.cpu_alarm_threshold
-statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
+  statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
 
   treat_missing_data = "notBreaching"
 
@@ -280,7 +280,7 @@ resource "aws_cloudwatch_metric_alarm" "mem_high" {
   period             = 60
   statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
   threshold          = var.mem_alarm_threshold
-  statistic          = "Average"
+ 
 
   treat_missing_data = "notBreaching"
 
@@ -305,7 +305,7 @@ resource "aws_cloudwatch_metric_alarm" "disk_high" {
   evaluation_periods = var.alarm_evaluation_periods
   threshold          = var.disk_alarm_threshold
   treat_missing_data = "notBreaching"
-
+  statistic          = "Maximum"   # <-- เปลี่ยนจาก Average
   alarm_actions = [aws_sns_topic.alerts.arn]
   ok_actions    = [aws_sns_topic.alerts.arn]
 
