@@ -44,19 +44,19 @@ variable "notebook_volume_size_gb" {
 variable "cpu_alarm_threshold" {
   type        = number
   description = "CPUUtilization threshold (%)"
-  default     = 80
+  default     = 20
 }
 
 variable "mem_alarm_threshold" {
   type        = number
   description = "mem_used_percent threshold (%) (custom metric from CloudWatch Agent)"
-  default     = 80
+  default     = 40
 }
 
 variable "disk_alarm_threshold" {
   type        = number
   description = "disk_used_percent threshold (%) (custom metric from CloudWatch Agent)"
-  default     = 80
+  default     = 40
 }
 
 variable "alarm_period_seconds" {
