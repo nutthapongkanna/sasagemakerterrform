@@ -3,7 +3,7 @@
 ############################################
 
 output "aws_account_id" {
-  description = "AWS Account ID that Terraform is running against"
+  description = "AWS Account ID"
   value       = data.aws_caller_identity.current.account_id
 }
 
@@ -28,52 +28,40 @@ output "sns_topic_arn" {
 }
 
 output "sagemaker_execution_role_arn" {
-  description = "Execution role ARN for SageMaker (service account)"
+  description = "SageMaker execution role ARN"
   value       = aws_iam_role.sagemaker_execution.arn
 }
 
-output "notebook_name" {
-  description = "SageMaker Notebook instance name"
+output "sagemaker_notebook_name" {
+  description = "SageMaker notebook instance name"
   value       = aws_sagemaker_notebook_instance.notebook.name
 }
 
-output "notebook_arn" {
-  description = "SageMaker Notebook instance ARN"
-  value       = aws_sagemaker_notebook_instance.notebook.arn
-}
-
-output "notebook_url" {
-  description = "Notebook URL (may be empty until InService)"
-  value       = aws_sagemaker_notebook_instance.notebook.url
-}
-
 output "cloudwatch_namespace" {
-  description = "Namespace used by CloudWatch Agent custom metrics"
+  description = "CloudWatch Agent namespace"
   value       = local.cw_agent_namespace
 }
 
-output "alarm_cpu_name" {
-  description = "CloudWatch alarm name for CPU high"
-  value       = aws_cloudwatch_metric_alarm.cpu_high.alarm_name
-}
-
-output "alarm_mem_name" {
-  description = "CloudWatch alarm name for memory high"
-  value       = aws_cloudwatch_metric_alarm.mem_high.alarm_name
-}
-
-output "alarm_disk_name" {
-  description = "CloudWatch alarm name for disk high"
-  value       = aws_cloudwatch_metric_alarm.disk_high.alarm_name
-}
-
+# IAM user outputs (only when created)
 output "iam_user_name" {
-  description = "IAM user created for AWS Console login (if enabled)"
+  description = "IAM user for console login (if created)"
   value       = var.create_iam_user ? aws_iam_user.human[0].name : null
 }
 
-output "iam_user_temp_password" {
-  description = "Temporary console password (ONLY available at creation time). If you recreate the login profile, it will change."
+output "iam_user_console_password" {
+  description = "Temporary console password (if created)"
   value       = var.create_iam_user ? aws_iam_user_login_profile.human_console[0].password : null
+  sensitive   = true
+}
+
+output "iam_user_access_key_id" {
+  description = "Access key id (if created)"
+  value       = (var.create_iam_user && var.create_access_key) ? aws_iam_access_key.human_key[0].id : null
+  sensitive   = true
+}
+
+output "iam_user_secret_access_key" {
+  description = "Secret access key (if created)"
+  value       = (var.create_iam_user && var.create_access_key) ? aws_iam_access_key.human_key[0].secret : null
   sensitive   = true
 }
