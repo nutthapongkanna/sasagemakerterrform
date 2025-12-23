@@ -190,7 +190,7 @@ sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json >/dev
   "metrics": {
     "namespace": "CWAgent",
     "append_dimensions": {
-      "InstanceId": "${aws:InstanceId}",
+      "InstanceId": "$${aws:InstanceId}",
       "NotebookInstanceName": "__NOTEBOOK_NAME__"
     },
     "metrics_collected": {
